@@ -12,17 +12,17 @@ on:
         required: true
         default: 'twrp-12.1'
       DEVICE_TREE_URL:
-        description: 'DEVICE_TREE_URL'
+        description: 'DEVICE_TREE_URL (e.g. https://github.com/ZH-XiJun/twrp_device_coolpad_CP23NV3)'
         required: true
         default: 'https://github.com/ZH-XiJun/twrp_device_coolpad_CP23NV3'
       DEVICE_TREE_BRANCH:
-        description: 'DEVICE_TREE_BRANCH'
-        required: true
-        default: 'twrp-12.1'
+        description: 'DEVICE_TREE_BRANCH (leave blank to use default branch)'
+        required: false
+        default: ''
       DEVICE_PATH:
-        description: 'DEVICE_PATH'
-        required: true
-        default: 'device/coolpad/CP23NV3'
+        description: 'DEVICE_PATH (leave blank to auto-derive from DEVICE_TREE_URL)'
+        required: false
+        default: ''
       COMMON_TREE_URL:
         description: 'COMMON_TREE_URL (if no common tree, leave blank)'
         required: false
@@ -30,13 +30,13 @@ on:
         description: 'COMMON_PATH (if no common tree, leave blank)'
         required: false
       DEVICE_NAME:
-        description: 'DEVICE_NAME'
-        required: true
-        default: 'CP23NV3'
+        description: 'DEVICE_NAME (leave blank to auto-derive from DEVICE_TREE_URL)'
+        required: false
+        default: ''
       MAKEFILE_NAME:
-        description: 'MAKEFILE_NAME'
-        required: true
-        default: 'twrp_CP23NV3'
+        description: 'MAKEFILE_NAME (leave blank to auto-derive from DEVICE_TREE_URL)'
+        required: false
+        default: ''
       BUILD_TARGET:
         description: 'BUILD_TARGET'
         required: true
@@ -49,6 +49,59 @@ jobs:
     permissions:
       contents: write
     steps:
+    # You might want to Checkout your repo first, but not mandatory
+    - name: Check Out
+      uses: actions/checkout@v7
+    # Cleanup The Actions Workspace Using Custom Composite Run Actions
+    - name: Cleanup
+      uses: rokibhasansagar/slimhub_actions@main
+      # That's it! Now use your normal steps
+
+    # Moved up (was after "Clone common tree"): the parsed MAKEFILE_NAME needs
+    # the twrp/omni prefix, so the tree type must be known before parsing.
+    - name: Check Build Tree
+      uses: haya14busa/action-cond@v1
+      id: buildtree
+      with:
+        cond: ${{ github.event.inputs.MANIFEST_BRANCH == 'twrp-11' || github.event.inputs.MANIFEST_BRANCH == 'twrp-12.1' }}
+        if_true: twrp
+        if_false: omni
+
+    - name: Parse device info
+      id: device_info
+      run: |
+        URL="${{ github.event.inputs.DEVICE_TREE_URL }}"
+        # Extract repo name from URL (strip path and .git suffix)
+        REPO_NAME=$(echo "$URL" | sed 's|.*/||; s|\.git$||')
+
+        # Pattern: twrp_device_MANUFACTURER_CODENAME
+        # Strip "twrp_device_" prefix, then split remaining by first underscore
+        REST=$(echo "$REPO_NAME" | sed 's/^twrp_device_//')
+        MANUFACTURER=$(echo "$REST" | cut -d'_' -f1)
+        CODENAME=$(echo "$REST" | cut -d'_' -f2-)
+
+        # Use explicit value if provided, otherwise derive
+        DEVICE_NAME="${{ github.event.inputs.DEVICE_NAME }}"
+        MAKEFILE_NAME="${{ github.event.inputs.MAKEFILE_NAME }}"
+        DEVICE_PATH="${{ github.event.inputs.DEVICE_PATH }}"
+
+        [ -z "$DEVICE_NAME" ] && DEVICE_NAME="$CODENAME"
+        [ -z "$MAKEFILE_NAME" ] && MAKEFILE_NAME="${{ steps.buildtree.outputs.value }}_${CODENAME}"
+        [ -z "$DEVICE_PATH" ] && DEVICE_PATH="device/${MANUFACTURER}/${CODENAME}"
+
+        echo "::group::Parsed Device Info"
+        echo "  Repo name:    ${REPO_NAME}"
+        echo "  Manufacturer: ${MANUFACTURER}"
+        echo "  Codename:     ${CODENAME}"
+        echo "  DEVICE_NAME   → ${DEVICE_NAME}"
+        echo "  MAKEFILE_NAME → ${MAKEFILE_NAME}"
+        echo "  DEVICE_PATH   → ${DEVICE_PATH}"
+        echo "::endgroup::"
+
+        echo "device_name=${DEVICE_NAME}" >> $GITHUB_OUTPUT
+        echo "makefile_name=${MAKEFILE_NAME}" >> $GITHUB_OUTPUT
+        echo "device_path=${DEVICE_PATH}" >> $GITHUB_OUTPUT
+
     - name: Display Run Parameters
       run: |
         echo "::group::User Environment Variables"
@@ -56,19 +109,11 @@ jobs:
         echo "Manifest Branch: ${{ github.event.inputs.MANIFEST_BRANCH }}"
         echo "Device Tree URL: ${{ github.event.inputs.DEVICE_TREE_URL }}"
         echo "Device Tree Branch: ${{ github.event.inputs.DEVICE_TREE_BRANCH }}"
-        echo "Device Path: ${{ github.event.inputs.DEVICE_PATH }}"
-        echo "Device Name: ${{ github.event.inputs.DEVICE_NAME }}"
-        echo "Makefile Name: ${{ github.event.inputs.MAKEFILE_NAME }}"
+        echo "Device Path: ${{ steps.device_info.outputs.device_path }}"
+        echo "Device Name: ${{ steps.device_info.outputs.device_name }}"
+        echo "Makefile Name: ${{ steps.device_info.outputs.makefile_name }}"
         echo "Build Target: ${{ github.event.inputs.BUILD_TARGET }}.img"
         echo "::endgroup::"
- 
-    # You might want to Checkout your repo first, but not mandatory
-    - name: Check Out
-      uses: actions/checkout@v3
-    # Cleanup The Actions Workspace Using Custom Composite Run Actions
-    - name: Cleanup
-      uses: rokibhasansagar/slimhub_actions@main
-      # That's it! Now use your normal steps
 
     - name: Prepare the environment
       run: |
@@ -116,7 +161,11 @@ jobs:
       
     - name: Clone device tree
       run: |
-        git clone ${{ github.event.inputs.DEVICE_TREE_URL }} -b ${{ github.event.inputs.DEVICE_TREE_BRANCH }} ./${{ github.event.inputs.DEVICE_PATH }}
+        if [ -z "${{ github.event.inputs.DEVICE_TREE_BRANCH }}" ]; then
+          git clone ${{ github.event.inputs.DEVICE_TREE_URL }} ./${{ steps.device_info.outputs.device_path }}
+        else
+          git clone ${{ github.event.inputs.DEVICE_TREE_URL }} -b ${{ github.event.inputs.DEVICE_TREE_BRANCH }} ./${{ steps.device_info.outputs.device_path }}
+        fi
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
     - name: Clone common tree
@@ -124,20 +173,16 @@ jobs:
         github.event.inputs.COMMON_TREE_URL != null
         && github.event.inputs.COMMON_PATH != null
       run: |
-        git clone ${{ github.event.inputs.COMMON_TREE_URL }} -b ${{ github.event.inputs.DEVICE_TREE_BRANCH }} ./${{ github.event.inputs.COMMON_PATH }}
+        if [ -z "${{ github.event.inputs.DEVICE_TREE_BRANCH }}" ]; then
+          git clone ${{ github.event.inputs.COMMON_TREE_URL }} ./${{ github.event.inputs.COMMON_PATH }}
+        else
+          git clone ${{ github.event.inputs.COMMON_TREE_URL }} -b ${{ github.event.inputs.DEVICE_TREE_BRANCH }} ./${{ github.event.inputs.COMMON_PATH }}
+        fi
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
-
-    - name: Check Build Tree
-      uses: haya14busa/action-cond@v1
-      id: buildtree
-      with:
-        cond: ${{ github.event.inputs.MANIFEST_BRANCH == 'twrp-11' || github.event.inputs.MANIFEST_BRANCH == 'twrp-12.1' }}
-        if_true: twrp
-        if_false: omni
 
     - name: Sync Device Dependencies
       run: |
-        bash ${GITHUB_WORKSPACE}/scripts/convert.sh ${{ github.event.inputs.DEVICE_PATH }}/${{ steps.buildtree.outputs.value }}.dependencies
+        bash ${GITHUB_WORKSPACE}/scripts/convert.sh ${{ steps.device_info.outputs.device_path }}/${{ steps.buildtree.outputs.value }}.dependencies
         repo sync -j$(nproc --all)
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       continue-on-error: true
@@ -151,7 +196,7 @@ jobs:
       run: |
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
-        lunch ${{ github.event.inputs.MAKEFILE_NAME }}-eng && make clean && mka ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
+        lunch ${{ steps.device_info.outputs.makefile_name }}-eng && make clean && mka ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
     - name: Setup tmate session
@@ -161,14 +206,14 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         files: | 
-          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ github.event.inputs.BUILD_TARGET }}.img
-          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/*.zip
-          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/*vendor*.img
-        name: ${{ github.event.inputs.DEVICE_NAME }}-${{ github.run_id }}
+          workspace/out/target/product/${{ steps.device_info.outputs.device_name }}/${{ github.event.inputs.BUILD_TARGET }}.img
+          workspace/out/target/product/${{ steps.device_info.outputs.device_name }}/*.zip
+          workspace/out/target/product/${{ steps.device_info.outputs.device_name }}/*vendor*.img
+        name: ${{ steps.device_info.outputs.device_name }}-${{ github.run_id }}
         tag_name: ${{ github.run_id }}
         body: |
           Manifest: ${{ github.event.inputs.MANIFEST_BRANCH }}
-          Device: ${{ github.event.inputs.DEVICE_NAME }}
+          Device: ${{ steps.device_info.outputs.device_name }}
           Target: ${{ github.event.inputs.BUILD_TARGET }}.img
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
